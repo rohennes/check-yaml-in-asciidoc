@@ -1,5 +1,41 @@
+# To test, define your personal Github auth token in a local TOKEN environmental variable.
+# Run the script: python check_asciidoc_yaml.py
+
 import re
 import yaml
+import subprocess
+import requests
+import json
+import os 
+
+# Get the GitHub token from environment variables
+github_token = os.getenv('TOKEN')
+if not github_token:
+    raise EnvironmentError("TOKEN environment variable is not set")
+
+# Get the latest commit ID
+commit_id = subprocess.run(
+    ['git', 'log', '-n', '1', '--pretty=format:%H'], 
+    capture_output=True, 
+    text=True
+).stdout.strip()
+if not commit_id:
+    raise RuntimeError("Failed to get the latest commit ID")
+
+# Fetch the pull request number associated with the commit ID
+response = requests.get(f"https://api.github.com/search/issues?q={commit_id}", headers={"Authorization": f"Bearer {github_token}"})
+if response.status_code == 200:
+    data = response.json()
+    if data['items']:
+        pull_number = data['items'][0]['number']
+    else:
+        pull_number = None
+else:
+    pull_number = None
+
+if not pull_number:
+    raise RuntimeError(f"Failed to find a pull request associated with commit ID {commit_id}")
+
 
 # Function to extract YAML blocks from AsciiDoc
 def extract_yaml_blocks_from_asciidoc(asciidoc_content):
@@ -16,11 +52,11 @@ def check_metadata_name(data):
         metadata_name = data['metadata']['name']
         expected_name = f"example-{kind_value}"
         if metadata_name != expected_name:
-            print(f"In the {kind_value} resource: Suggestion: metadata.name should be '{expected_name}' instead of '{metadata_name}'")
+            return f"Suggestion: metadata.name should be '{expected_name}' instead of '{metadata_name}'"
         else:
-            print(f"In the {kind_value} resource: metadata.name is correctly set to '{metadata_name}'")
+            return f"metadata.name is correctly set to '{metadata_name}'"
     else:
-        print("YAML structure is missing required fields.")
+        return "YAML structure is missing a required field: 'metadata.name'"
 
 # Function to check for public IP addresses
 def check_public_ip_addresses(yaml_content, kind_value):
@@ -41,37 +77,96 @@ def check_public_ip_addresses(yaml_content, kind_value):
             public_ips.append(ip)
     
     if public_ips:
-        print(f"In the {kind_value} resource: Public IP addresses found: {', '.join(public_ips)}")
-        print(f"Suggestion: Replace public IP addresses with reserved documentation addresses from blocks: {', '.join(reserved_doc_ip_blocks)}")
+        return f"Public IP addresses found: {', '.join(public_ips)}. Suggestion: Replace public IP addresses with reserved documentation addresses from blocks: {', '.join(reserved_doc_ip_blocks)}"
+    return None
 
 # Function to provide a warning for sensitive data
 def sensitive_data_warning_for_yaml(data):
     if 'kind' in data:
         kind_value = data['kind']
-        print(f"You added the following YAML resource: {kind_value}. Ensure any resources you define in YAML do not inadvertently describe or name new or unreleased Red Hat, customer, or partner features or products.")
+        return f"You added the following YAML resource: {kind_value}. Ensure any resources you define in YAML do not inadvertently describe or name new or unreleased Red Hat, customer, or partner features or products."
+    return None
 
-# Read AsciiDoc content from file
-asciidoc_file_path = 'source-full.adoc'
-with open(asciidoc_file_path, 'r') as file:
-    asciidoc_content = file.read()
+# Function to check for MAC addresses
+def check_mac_addresses(yaml_content, kind_value):
+    mac_pattern = re.compile(r'([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})')
+    mac_addresses = mac_pattern.findall(yaml_content)
+    if mac_addresses:
+        return f"MAC addresses found in {kind_value}: {', '.join(':'.join(mac) for mac in mac_addresses)}. Ensure these are appropriate for the context."
+    return None
 
-yaml_blocks = extract_yaml_blocks_from_asciidoc(asciidoc_content)
-if yaml_blocks:
-    for index, yaml_content in enumerate(yaml_blocks):
-        try:
-            data = load_yaml(yaml_content)
-            print("")
-            print("Checking metadata.name with best practices...")
-            check_metadata_name(data)
-            print("")
-            print("Checking for public IP addresses in YAML...")
-            check_public_ip_addresses(yaml_content, data.get('kind', f'code block {index + 1}'))
-            print("")
-            print("Checking if YAML resource added...")
-            sensitive_data_warning_for_yaml(data)
-            print("")
-            print("#####################################")
-        except yaml.YAMLError as e:
-            print(f"Error parsing YAML content in code block {index + 1}: {e}")
-else:
-    print("No YAML content found in AsciiDoc.")
+# Get the list of modified .adoc files
+git_command = [
+    'git', 'diff', '--name-only', 'HEAD~1', 'HEAD',
+    '--diff-filter=d', '*.adoc',
+    ':(exclude)_unused_topics/*',
+    ':(exclude)rest_api/*',
+    ':(exclude)microshift_rest_api/*',
+    ':(exclude)modules/virt-runbook-*',
+    ':(exclude)modules/oc-by-example-content.adoc',
+    ':(exclude)modules/oc-adm-by-example-content.adoc',
+    ':(exclude)monitoring/config-map-reference-for-the-cluster-monitoring-operator.adoc',
+    ':(exclude)modules/microshift-oc-adm-by-example-content.adoc',
+    ':(exclude)modules/microshift-oc-by-example-content.adoc'
+]
+
+result = subprocess.run(git_command, capture_output=True, text=True)
+files = result.stdout.splitlines()
+print (files)
+
+# Collect the outputs of all checks
+comment_body = ""
+
+# Iterate over each file and perform the checks
+for file_path in files:
+    comment_body += f"Processing file: {file_path}\n"
+    with open(file_path, 'r') as file:
+        asciidoc_content = file.read()
+
+    yaml_blocks = extract_yaml_blocks_from_asciidoc(asciidoc_content)
+    if yaml_blocks:
+        for index, yaml_content in enumerate(yaml_blocks):
+            try:
+                data = load_yaml(yaml_content)
+                kind_value = data.get('kind', f'code block {index + 1}')
+                
+                metadata_name_check = check_metadata_name(data)
+                if metadata_name_check:
+                    comment_body += f"\n{metadata_name_check}\n"
+                
+                public_ip_check = check_public_ip_addresses(yaml_content, kind_value)
+                if public_ip_check:
+                    comment_body += f"\n{public_ip_check}\n"
+                
+                sensitive_data_warning = sensitive_data_warning_for_yaml(data)
+                if sensitive_data_warning:
+                    comment_body += f"\n{sensitive_data_warning}\n"
+                
+                mac_address_check = check_mac_addresses(yaml_content, kind_value)
+                if mac_address_check:
+                    comment_body += f"\n{mac_address_check}\n"
+                
+                comment_body += "#####################################\n"
+            except yaml.YAMLError as e:
+                comment_body += f"Error parsing YAML content in {kind_value}: {e}\n"
+    else:
+        comment_body += f"No YAML content found in {file_path}.\n"
+
+# Function to post a comment on the pull request
+def post_comment():
+    url = f"https://api.github.com/repos/openshift/openshift-docs/issues/{pull_number}/comments"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {github_token}",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+    data = {"body": comment_body}
+
+    response = requests.post(url, headers=headers, json=data)
+    if response.status_code == 201:
+        print("Comment posted successfully")
+    else:
+        print(f"Failed to post comment: {response.status_code}")
+        print(response.json())
+
+post_comment()

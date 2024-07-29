@@ -25,6 +25,7 @@ data:
   mykey: myvalue
   public_ip: 203.0.113.5
   private_ip: 192.168.1.1
+  mac_address: 00:1A:2B:3C:4D:5E
 ----
 
 .. Create the config map from the `configmap.yaml` file:
@@ -58,6 +59,8 @@ spec:
           value: "198.51.100.1"
         - name: PRIVATE_IP
           value: "10.0.0.5"
+        - name: MAC_ADDRESS
+          value: "AA:BB:CC:DD:EE:FF"
       securityContext:
         allowPrivilegeEscalation: false
         capabilities:
